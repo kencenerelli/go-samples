@@ -47,15 +47,48 @@ func getClient(config *oauth2.Config) *http.Client {
 
 // Request a token from the web, then returns the retrieved token.
 func getTokenFromWeb(config *oauth2.Config) *oauth2.Token {
-	authURL := config.AuthCodeURL("state-token", oauth2.AccessTypeOffline)
-	fmt.Printf("Go to the following link in your browser then type the "+
-		"authorization code: \n%v\n", authURL)
+	// Set the redirect URL to match the local server we are about to start
+	config.RedirectURL = "http://localhost:8080"
 
-	var authCode string
-	if _, err := fmt.Scan(&authCode); err != nil {
-		log.Fatalf("Unable to read authorization code: %v", err)
+	authURL := config.AuthCodeURL("state-token", oauth2.AccessTypeOffline)
+	fmt.Printf("Go to the following link in your browser: \n%v\n", authURL)
+
+	// Create a channel to wait for the authorization code
+	codeCh := make(chan string)
+
+	// Create a local HTTP multiplexer and server to listen for the OAuth2 callback
+	m := http.NewServeMux()
+	server := &http.Server{Addr: ":8080", Handler: m}
+
+	m.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		code := r.URL.Query().Get("code")
+		if code != "" {
+			fmt.Fprintf(w, "Authentication successful! You may close this window.")
+			codeCh <- code
+		} else {
+			fmt.Fprintf(w, "Failed to get authorization code. You may close this window.")
+			codeCh <- ""
+		}
+	})
+
+	// Start the server in a goroutine
+	go func() {
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("Unable to start local web server: %v", err)
+		}
+	}()
+
+	// Wait for the code to be extracted from the callback
+	authCode := <-codeCh
+
+	// Shutdown the server gracefully now that we have the code
+	server.Shutdown(context.Background())
+
+	if authCode == "" {
+		log.Fatalf("Authorization failed or code not returned.")
 	}
 
+	// Exchange the authorization code for an access token
 	tok, err := config.Exchange(context.TODO(), authCode)
 	if err != nil {
 		log.Fatalf("Unable to retrieve token from web: %v", err)
